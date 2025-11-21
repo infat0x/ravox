@@ -1,0 +1,9 @@
+mailfilter.dtx.gov.az
+www.dtx.gov.az
+contact.dtx.gov.az
+akademiya.dtx.gov.az
+batm.dtx.gov.az
+mail.dtx.gov.az
+search.dtx.gov.az
+search-akademiya.dtx.gov.az
+emuzey.dtx.gov.az

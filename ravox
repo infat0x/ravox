@@ -1,0 +1,408 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# TOOL NAME : RAVOX (Recon Automated Vulnerability Observation eXecutor)
+# VERSION   : 7.5 (TXT Output + Emoji Fix)
+# AUTHOR    : Ravox Team
+# -----------------------------------------------------------------------------
+
+# --- High Intensity Colors ---
+RED='\033[0;91m'
+GREEN='\033[0;92m'
+YELLOW='\033[0;93m'
+BLUE='\033[0;94m'
+PURPLE='\033[0;95m'
+CYAN='\033[0;96m'
+WHITE='\033[0;97m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m' # No Color
+
+# Backgrounds
+BG_BLUE='\033[44m'
+
+# --- Fixed Icons (With Extra Space) ---
+ICON_ROCKET="🚀 "
+ICON_SEARCH="🔎 "
+ICON_CHECK="✅ "
+ICON_ERROR="❌ "
+ICON_WARN="⚠️  "
+ICON_SAVE="💾 "
+ICON_SPIDER="🕷️  "
+ICON_GEAR="⚙️  "
+ICON_KEY="🔑 "
+ICON_BURP="🔶 "
+ICON_INFO="ℹ️  "
+ICON_ROBOT="🤖 "
+
+# --- Global Configuration ---
+TARGET_DOMAIN=""
+TARGET_LIST=""
+OUTPUT_BASE="ravox_results"
+FINAL_OUTPUT_DIR=""
+BURP_PROXY=""
+DRY_RUN=false
+LLM_ANALYSIS=false
+API_KEY=""
+
+# --- Trap for Cleanup (Ctrl+C) ---
+trap cleanup SIGINT
+
+cleanup() {
+    echo -e "\n\n${RED}${BOLD} [!] Aborted by user. Stopping background processes...${NC}"
+    if [ ! -z "$PID" ]; then
+        kill $PID 2>/dev/null
+    fi
+    tput cnorm
+    exit 1
+}
+
+# -----------------------------------------------------------------------------
+# UI HELPERS
+# -----------------------------------------------------------------------------
+draw_line() {
+    printf "${DIM}"
+    printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '─'
+    printf "${NC}"
+}
+
+draw_header() {
+    echo -e "\n${BG_BLUE}${WHITE}${BOLD}  $1  ${NC}"
+}
+
+# Updated: Now reads directly from TXT file
+render_markdown() {
+    local input_file="$1"
+    
+    if [ ! -f "$input_file" ]; then
+        return
+    fi
+
+    cat "$input_file" | while IFS= read -r line; do
+        if [[ "$line" =~ ^### ]]; then
+             clean_line=$(echo "$line" | sed 's/### //g')
+             echo -e "\n${CYAN}${BOLD}➤ $clean_line${NC}"
+        elif [[ "$line" =~ \*\* ]]; then
+             formatted_line=$(echo "$line" | sed -E "s/\*\*([^*]+)\*\*/${WHITE}${BOLD}\1${NC}${DIM}/g")
+             echo -e "${DIM}$formatted_line${NC}"
+        elif [[ "$line" =~ ^- ]]; then
+             echo -e "  ${GREEN}•${NC} ${DIM}${line:1}${NC}"
+        elif [[ "$line" =~ ^[0-9]+\. ]]; then
+             echo -e "  ${YELLOW}${line%%.*}.${NC} ${DIM}${line#*.}${NC}"
+        else
+             echo -e "${DIM}$line${NC}"
+        fi
+    done
+}
+
+# -----------------------------------------------------------------------------
+# VISUAL: BANNER
+# -----------------------------------------------------------------------------
+print_banner() {
+    clear
+    echo -e "${PURPLE}${BOLD}"
+    echo "   ____    _    __     __  ___   __  __"
+    echo "  |  _ \  / \   \ \   / / / _ \  \ \/ /"
+    echo "  | |_) |/ _ \   \ \ / / | | | |  \  / "
+    echo "  |  _ <| ___ \   \ V /  | |_| |  /  \ "
+    echo "  |_| \_\_| \_\    \_/    \___/  /_/\_\\"
+    echo -e "${CYAN}  Recon Automated Vulnerability Observation eXecutor${NC}"
+    echo -e "${DIM}  v7.5 // TXT Report Edition${NC}"
+    draw_line
+}
+
+# -----------------------------------------------------------------------------
+# HELP MENU
+# -----------------------------------------------------------------------------
+show_help() {
+    print_banner
+    echo -e "${BOLD}USAGE:${NC}"
+    echo -e "  $0 [FLAGS]"
+    echo -e ""
+    echo -e "${BOLD}FLAGS:${NC}"
+    echo -e "  ${CYAN}-d, --domain${NC}    Target domain (e.g., tesla.com)"
+    echo -e "  ${CYAN}-l, --list${NC}      Path to file containing list of domains"
+    echo -e "  ${CYAN}-o, --output${NC}    Base output directory (Default: ravox_results)"
+    echo -e "  ${CYAN}-p, --proxy${NC}     HTTP Proxy URL (e.g., http://127.0.0.1:8080)"
+    echo -e "  ${CYAN}    --llm${NC}       Enable Mistral AI Analysis"
+    echo -e "  ${CYAN}    --dry-run${NC}   Print commands without executing them"
+    echo -e "  ${CYAN}-h, --help${NC}      Show this help menu"
+    echo -e ""
+    exit 0
+}
+
+# -----------------------------------------------------------------------------
+# VISUAL: PROGRESS BAR
+# -----------------------------------------------------------------------------
+progress_bar() {
+    local pid=$1
+    local percentage=0
+    local width=40
+    
+    tput civis 
+    local full_block="█"
+    local empty_block="░"
+
+    while kill -0 $pid 2>/dev/null; do
+        if [ $percentage -lt 95 ]; then
+            percentage=$((percentage + 1))
+        fi
+        
+        local filled=$(( (percentage * width) / 100 ))
+        local empty=$(( width - filled ))
+        
+        local bar_filled=$(printf "%0.s$full_block" $(seq 1 $filled))
+        local bar_empty=$(printf "%0.s$empty_block" $(seq 1 $empty))
+        
+        printf "\r  ${CYAN}${bar_filled}${DIM}${bar_empty}${NC} ${BOLD}${percentage}%%${NC} "
+        sleep 0.5
+    done
+
+    local full_bar=$(printf "%0.s$full_block" $(seq 1 $width))
+    printf "\r  ${GREEN}${full_bar}${NC} ${BOLD}100%%${NC} ${GREEN}${ICON_CHECK}${NC}\n"
+    tput cnorm
+}
+
+# -----------------------------------------------------------------------------
+# CHECK TOOLS
+# -----------------------------------------------------------------------------
+check_tools() {
+    draw_header "SYSTEM CHECK"
+    TOOLS=("subfinder" "dnsx" "naabu" "httpx" "katana")
+    MISSING=0
+    
+    for tool in "${TOOLS[@]}"; do
+        if ! command -v $tool &> /dev/null; then
+            echo -e "  ${ICON_ERROR} ${RED}${tool}${NC} ${DIM}...............${NC} ${RED}MISSING${NC}"
+            MISSING=1
+        else
+            echo -e "  ${ICON_CHECK} ${GREEN}${tool}${NC} ${DIM}...............${NC} ${GREEN}INSTALLED${NC}"
+        fi
+    done
+
+    if [ $MISSING -eq 1 ]; then
+        echo -e "\n${ICON_WARN} ${YELLOW}Please install missing tools (go install ...)${NC}"
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# INTERACTIVE MODE
+# -----------------------------------------------------------------------------
+interactive_mode() {
+    echo -e ""
+    draw_header "CONFIGURATION WIZARD"
+
+    echo -e "${ICON_SEARCH} ${BOLD}Target Domain${NC} (e.g., example.com)"
+    read -p "  └─> " INT_DOMAIN
+    [ ! -z "$INT_DOMAIN" ] && TARGET_DOMAIN="$INT_DOMAIN" || { echo -e "${RED}No target!${NC}"; exit 1; }
+
+    echo -e "\n${ICON_SAVE} ${BOLD}Output Directory${NC} (Default: ravox_results)"
+    read -p "  └─> " INT_OUTPUT
+    [ ! -z "$INT_OUTPUT" ] && OUTPUT_BASE="$INT_OUTPUT"
+
+    echo -e "\n${ICON_BURP} ${BOLD}Use Burp Proxy?${NC} (y/N)"
+    read -p "  └─> " INT_PROXY_ASK
+    if [[ "$INT_PROXY_ASK" =~ ^[Yy]$ ]]; then
+        echo -e "  ${DIM}Enter Proxy (Default: http://127.0.0.1:8080)${NC}"
+        read -p "  └─> " INT_PROXY_ADDR
+        BURP_PROXY="${INT_PROXY_ADDR:-http://127.0.0.1:8080}"
+    fi
+
+    echo -e "\n${ICON_KEY} ${BOLD}Enable AI Analysis (Mistral)?${NC} (y/N)"
+    read -p "  └─> " INT_LLM
+    if [[ "$INT_LLM" =~ ^[Yy]$ ]]; then
+        LLM_ANALYSIS=true
+        if [ -z "$MISTRAL_API_KEY" ]; then
+            echo -e "  ${YELLOW}Enter Mistral API Key (Visible Input):${NC}"
+            read -p "  └─> " API_KEY_INPUT
+            export MISTRAL_API_KEY="$API_KEY_INPUT"
+            echo ""
+        fi
+    fi
+    echo ""
+}
+
+# -----------------------------------------------------------------------------
+# ARGUMENT PARSING
+# -----------------------------------------------------------------------------
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -d|--domain) TARGET_DOMAIN="$2"; shift ;;
+        -l|--list) TARGET_LIST="$2"; shift ;;
+        -o|--output) OUTPUT_BASE="$2"; shift ;;
+        -p|--proxy) BURP_PROXY="$2"; shift ;;
+        --dry-run) DRY_RUN=true ;;
+        --llm) LLM_ANALYSIS=true ;;
+        -h|--help) show_help ;; 
+        *) echo -e "${RED}Unknown option: $1${NC}"; show_help ;;
+    esac
+    shift
+done
+
+print_banner
+
+if [ -z "$TARGET_DOMAIN" ] && [ -z "$TARGET_LIST" ]; then
+    check_tools
+    interactive_mode
+else
+    if [ "$DRY_RUN" = false ]; then
+        check_tools
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# DIRECTORY SETUP
+# -----------------------------------------------------------------------------
+SCAN_DATE=$(date +'%Y-%m-%d_%H-%M')
+if [ ! -z "$TARGET_DOMAIN" ]; then
+    FOLDER_NAME="${TARGET_DOMAIN}_${SCAN_DATE}"
+else
+    FOLDER_NAME="$(basename $TARGET_LIST)_${SCAN_DATE}"
+fi
+FINAL_OUTPUT_DIR="${OUTPUT_BASE}/${FOLDER_NAME}"
+
+if [ "$DRY_RUN" = false ]; then
+    mkdir -p "$FINAL_OUTPUT_DIR"
+fi
+
+# -----------------------------------------------------------------------------
+# EXECUTION WRAPPER
+# -----------------------------------------------------------------------------
+run_tool() {
+    CMD="$1"
+    TITLE="$2"
+    LOGFILE="$3"
+    INPUT_FILE="$4"
+    
+    echo ""
+    echo -e "${BLUE}┌──────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC} ${BOLD}$TITLE${NC}"
+    echo -e "${BLUE}└──────────────────────────────────────────────────────────────┘${NC}"
+
+    if [ ! -z "$INPUT_FILE" ] && [ ! -s "$INPUT_FILE" ]; then
+         echo -e "  ${ICON_WARN} ${DIM}Skipping: No input data available.${NC}"
+         return
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "  ${YELLOW}[DRY-RUN] $CMD${NC}"
+        return
+    fi
+
+    eval "$CMD > /dev/null 2>&1" & 
+    PID=$!
+    progress_bar $PID
+    wait $PID
+    
+    if [ $? -eq 0 ]; then
+        COUNT=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+        if [ "$COUNT" -gt 0 ]; then
+            echo -e "  ${ICON_SAVE} Results Saved: ${WHITE}$LOGFILE${NC}"
+            echo -e "  ${ICON_INFO} Findings: ${GREEN}${BOLD}$COUNT${NC}"
+        else
+            echo -e "  ${ICON_WARN} ${YELLOW}No results found in this step.${NC}"
+        fi
+    else
+        echo -e "  ${ICON_ERROR} ${RED}Tool execution failed.${NC}"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# PIPELINE
+# -----------------------------------------------------------------------------
+
+# 1. SUBDOMAINS
+SUB_ARGS="-silent -all"
+[ ! -z "$TARGET_DOMAIN" ] && SUB_ARGS="$SUB_ARGS -d $TARGET_DOMAIN"
+[ ! -z "$TARGET_LIST" ] && SUB_ARGS="$SUB_ARGS -dL $TARGET_LIST"
+run_tool "subfinder $SUB_ARGS -o $FINAL_OUTPUT_DIR/subfinder.txt" "STEP 1: Subdomain Enumeration (Subfinder)" "$FINAL_OUTPUT_DIR/subfinder.txt"
+
+# 2. RESOLVING
+run_tool "dnsx -l $FINAL_OUTPUT_DIR/subfinder.txt -silent -o $FINAL_OUTPUT_DIR/dnsx.txt" "STEP 2: DNS Resolution (DNSx)" "$FINAL_OUTPUT_DIR/dnsx.txt" "$FINAL_OUTPUT_DIR/subfinder.txt"
+
+# 3. PORT SCAN
+run_tool "naabu -list $FINAL_OUTPUT_DIR/dnsx.txt -p 80,443,8000,8080,8443,8888 -silent -o $FINAL_OUTPUT_DIR/naabu.txt" "STEP 3: Port Scanning (Naabu)" "$FINAL_OUTPUT_DIR/naabu.txt" "$FINAL_OUTPUT_DIR/dnsx.txt"
+
+# 4. HTTP PROBING
+HTTPX_OPTS="-title -tech-detect -status-code -silent"
+[ ! -z "$BURP_PROXY" ] && HTTPX_OPTS="$HTTPX_OPTS -http-proxy $BURP_PROXY"
+run_tool "httpx -list $FINAL_OUTPUT_DIR/naabu.txt $HTTPX_OPTS -o $FINAL_OUTPUT_DIR/httpx.txt" "STEP 4: Web Service Discovery (HTTPX)" "$FINAL_OUTPUT_DIR/httpx.txt" "$FINAL_OUTPUT_DIR/naabu.txt"
+
+# 4.5 CLEANUP
+if [ "$DRY_RUN" = false ] && [ -s "$FINAL_OUTPUT_DIR/httpx.txt" ]; then
+    cat "$FINAL_OUTPUT_DIR/httpx.txt" | awk '{print $1}' > "$FINAL_OUTPUT_DIR/httpx_clean.txt"
+fi
+
+# 5. CRAWLING
+KATANA_OPTS="-d 3 -silent -jc"
+[ ! -z "$BURP_PROXY" ] && KATANA_OPTS="$KATANA_OPTS -proxy $BURP_PROXY"
+run_tool "katana -list $FINAL_OUTPUT_DIR/httpx_clean.txt $KATANA_OPTS -o $FINAL_OUTPUT_DIR/katana.txt" "STEP 5: URL Crawling (Katana)" "$FINAL_OUTPUT_DIR/katana.txt" "$FINAL_OUTPUT_DIR/httpx_clean.txt"
+
+# -----------------------------------------------------------------------------
+# AI ANALYSIS (MISTRAL + TXT OUTPUT)
+# -----------------------------------------------------------------------------
+if [ "$LLM_ANALYSIS" = true ] && [ "$DRY_RUN" = false ]; then
+    echo ""
+    echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${PURPLE}│${NC} ${BOLD}BONUS: MISTRAL AI VULNERABILITY ANALYSIS${NC}"
+    echo -e "${PURPLE}└──────────────────────────────────────────────────────────────┘${NC}"
+    
+    if [ -s "$FINAL_OUTPUT_DIR/katana.txt" ]; then
+        SAMPLE_URLS=$(head -n 50 "$FINAL_OUTPUT_DIR/katana.txt" | tr '\n' ', ')
+        SAFE_PROMPT="Analyze these URLs for potential IDOR/SQLi/XSS. List top 5 risky endpoints: $SAMPLE_URLS"
+        JSON_CONTENT=$(echo "$SAFE_PROMPT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+
+        # 1. Get Raw JSON
+        curl -s https://api.mistral.ai/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $MISTRAL_API_KEY" \
+          -d "{ 
+                \"model\": \"mistral-small-latest\", 
+                \"messages\": [{\"role\": \"user\", \"content\": \"$JSON_CONTENT\"}] 
+              }" > "$FINAL_OUTPUT_DIR/llm_temp.json" & 
+        
+        PID=$!
+        progress_bar $PID
+        wait $PID
+        
+        # 2. Convert JSON to TXT (Python)
+        if [ -s "$FINAL_OUTPUT_DIR/llm_temp.json" ]; then
+             python3 -c "import sys, json; print(json.load(open('$FINAL_OUTPUT_DIR/llm_temp.json'))['choices'][0]['message']['content'])" > "$FINAL_OUTPUT_DIR/llm_analysis.txt" 2>/dev/null
+             rm "$FINAL_OUTPUT_DIR/llm_temp.json" # Remove raw json
+        fi
+
+        echo -e "  ${ICON_CHECK} ${GREEN}Analysis Completed! Displaying Report below:${NC}"
+        draw_line
+        render_markdown "$FINAL_OUTPUT_DIR/llm_analysis.txt"
+        draw_line
+        echo -e "  ${ICON_SAVE} Text Report saved to: ${WHITE}$FINAL_OUTPUT_DIR/llm_analysis.txt${NC}"
+    else
+        echo -e "  ${ICON_WARN} ${DIM}Skipping AI: No URLs found.${NC}"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# FINAL DASHBOARD
+# -----------------------------------------------------------------------------
+if [ "$DRY_RUN" = false ]; then
+    SUB_COUNT=$(wc -l < $FINAL_OUTPUT_DIR/subfinder.txt 2>/dev/null || echo 0)
+    HOST_COUNT=$(wc -l < $FINAL_OUTPUT_DIR/dnsx.txt 2>/dev/null || echo 0)
+    PORT_COUNT=$(wc -l < $FINAL_OUTPUT_DIR/naabu.txt 2>/dev/null || echo 0)
+    WEB_COUNT=$(wc -l < $FINAL_OUTPUT_DIR/httpx.txt 2>/dev/null || echo 0)
+    URL_COUNT=$(wc -l < $FINAL_OUTPUT_DIR/katana.txt 2>/dev/null || echo 0)
+
+    echo -e "\n"
+    echo -e "  ${BOLD}SCAN REPORT${NC}"
+    echo -e "  ${DIM}Dir: ${FINAL_OUTPUT_DIR}${NC}"
+    echo -e "  ┌──────────────────────┬───────────────┐"
+    echo -e "  │ ${BOLD}MODULE${NC}               │ ${BOLD}FINDINGS${NC}      │"
+    echo -e "  ├──────────────────────┼───────────────┤"
+    printf "  │ %-20s │ ${GREEN}%-13s${NC} │\n" "Subdomains" "$SUB_COUNT"
+    printf "  │ %-20s │ ${GREEN}%-13s${NC} │\n" "Live Hosts" "$HOST_COUNT"
+    printf "  │ %-20s │ ${GREEN}%-13s${NC} │\n" "Open Ports" "$PORT_COUNT"
+    printf "  │ %-20s │ ${GREEN}%-13s${NC} │\n" "Web Services" "$WEB_COUNT"
+    printf "  │ %-20s │ ${GREEN}%-13s${NC} │\n" "Crawled URLs" "$URL_COUNT"
+    echo -e "  └──────────────────────┴───────────────┘"
+    echo -e "\n  ${ICON_ROCKET} ${BOLD}Happy Hunting!${NC}\n"
+fi
