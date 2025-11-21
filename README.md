@@ -1,14 +1,3 @@
-Congratulations on completing your final project\! 🔥 This tool looks highly functional and "advanced."
-
-To make it look professional when you share it on GitHub or in your portfolio, I have prepared a **Premium Level README.md** file below.
-
-This includes all features, installation steps, usage instructions, and details about the AI integration.
-
------
-
-### 📄 `README.md` (Copy and save this file)
-
-````markdown
 # 🚀 RAVOX - Recon Automated Vulnerability Observation eXecutor
 
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)
@@ -168,14 +157,3 @@ Do not use this tool on targets you do not have explicit permission to test. The
 -----
 
 *Happy Hunting\! 🚀*
-
-```
-
-### How to use this:
-1.  Create a new text file in your project folder.
-2.  Copy the code block above.
-3.  Paste it into the file.
-4.  Save the file as **`README.md`**.
-
-Good luck with your project presentation! 🚀
-```
